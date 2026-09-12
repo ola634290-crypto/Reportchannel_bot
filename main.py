@@ -2,19 +2,17 @@ import os
 import asyncio
 import logging
 from datetime import datetime
-from telegram import Bot
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.error import TelegramError
 
-# ================= Configuration Area =================
-# 从环境变量读取，或者在本地测试时直接替换为字符串
+# ================= Configuration =================
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
 
-# 发送频率设置：每2分钟发送10次
 TOTAL_SENDS = 10
-INTERVAL_SECONDS = 120 / TOTAL_SENDS  # 12秒一次
-
-# ====================================================
+INTERVAL_SECONDS = 120 / TOTAL_SENDS  # 12s between each send
+# =================================================
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -22,51 +20,78 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-async def send_channel_report():
-    """向频道发送报告的逻辑"""
-    bot = Bot(token=TOKEN)
-    
-    # 构造你的报告内容，这里以时间戳为例
-    message_text = f"📢 **自动化频道报告**\n🕒 发送时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
+# ---------- Command handlers (so the bot replies to you) ----------
+
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 Bot is alive.\n"
+        f"Target channel: {CHANNEL_ID}\n"
+        f"Schedule: {TOTAL_SENDS} messages every 2 minutes.\n"
+        "Commands: /status /test"
+    )
+
+
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"✅ Running.\nLast check: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+
+async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send a single test message to the channel right now."""
+    try:
+        await context.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=f"🧪 Test message at {datetime.now().strftime('%H:%M:%S')}"
+        )
+        await update.message.reply_text("✅ Test message sent to channel.")
+    except TelegramError as e:
+        await update.message.reply_text(f"❌ Failed: {e}")
+
+
+# ---------- Scheduled reporting job ----------
+
+async def send_channel_report(context: ContextTypes.DEFAULT_TYPE):
+    """Send 10 messages, one every 12 seconds."""
     for i in range(TOTAL_SENDS):
         try:
-            # 发送消息
-            await bot.send_message(
+            await context.bot.send_message(
                 chat_id=CHANNEL_ID,
-                text=message_text,
-                parse_mode="Markdown" # 支持 Markdown 格式化 [citation:8]
+                text=f"📢 Report {i+1}/{TOTAL_SENDS}\n"
+                     f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
-            logger.info(f"发送成功: {i+1}/{TOTAL_SENDS}")
-            
-            # 如果不是最后一次发送，则等待间隔时间
-            if i < TOTAL_SENDS - 1:
-                await asyncio.sleep(INTERVAL_SECONDS)
-                
+            logger.info(f"Sent {i+1}/{TOTAL_SENDS}")
         except TelegramError as e:
-            logger.error(f"发送失败: {e}")
-            # 遇到错误时稍作延迟，避免死循环
-            await asyncio.sleep(5)
+            logger.error(f"Send failed: {e}")
+        if i < TOTAL_SENDS - 1:
+            await asyncio.sleep(INTERVAL_SECONDS)
 
-    logger.info("本轮发送任务完成。")
 
-async def main():
-    """主循环"""
-    logger.info("机器人启动...")
-    
-    while True:
-        try:
-            await send_channel_report()
-            # 等待下一轮周期（2分钟周期已包含在发送逻辑中，这里只需等待剩余的极短时间或直接重置周期）
-            # 为了严格符合“每2分钟发送10次”，上一轮结束后稍微暂停一下再开始下一轮
-            logger.info("等待 2 分钟进入下一轮...")
-            await asyncio.sleep(120)
-        except Exception as e:
-            logger.error(f"主循环异常: {e}")
-            await asyncio.sleep(60)
+# ---------- Main ----------
+
+def main():
+    if not TOKEN or not CHANNEL_ID:
+        logger.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHANNEL_ID")
+        return
+
+    app = Application.builder().token(TOKEN).build()
+
+    # Register commands
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("test", test_cmd))
+
+    # Schedule the report every 120 seconds
+    app.job_queue.run_repeating(
+        send_channel_report,
+        interval=120,
+        first=10  # first run 10s after startup
+    )
+
+    logger.info("Bot started. Polling...")
+    app.run_polling()
+
 
 if __name__ == "__main__":
-    if not TOKEN or not CHANNEL_ID:
-        logger.error("缺少环境变量 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHANNEL_ID")
-    else:
-        asyncio.run(main())
+    main()
