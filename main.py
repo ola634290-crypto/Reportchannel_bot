@@ -1,511 +1,72 @@
 import os
+import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
+from telegram import Bot
+from telegram.error import TelegramError
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters,
-)
+# ================= Configuration Area =================
+# 从环境变量读取，或者在本地测试时直接替换为字符串
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
+# 发送频率设置：每2分钟发送10次
+TOTAL_SENDS = 10
+INTERVAL_SECONDS = 120 / TOTAL_SENDS  # 12秒一次
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-if not BOT_TOKEN:
-    raise RuntimeError(
-        "BOT_TOKEN is missing. Add BOT_TOKEN in Railway Variables."
-    )
-
-
-# ============================================================
-# LOGGING
-# ============================================================
+# ====================================================
 
 logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
 )
-
 logger = logging.getLogger(__name__)
 
+async def send_channel_report():
+    """向频道发送报告的逻辑"""
+    bot = Bot(token=TOKEN)
+    
+    # 构造你的报告内容，这里以时间戳为例
+    message_text = f"📢 **自动化频道报告**\n🕒 发送时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
-# ============================================================
-# TEMPORARY REPORT STORAGE
-# ============================================================
-
-reports = []
-
-
-# ============================================================
-# /START
-# ============================================================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "📝 Submit Report",
-                callback_data="submit_report",
+    for i in range(TOTAL_SENDS):
+        try:
+            # 发送消息
+            await bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=message_text,
+                parse_mode="Markdown" # 支持 Markdown 格式化 [citation:8]
             )
-        ],
-        [
-            InlineKeyboardButton(
-                "ℹ️ About",
-                callback_data="about",
-            ),
-            InlineKeyboardButton(
-                "❓ Help",
-                callback_data="help",
-            ),
-        ],
-    ]
-
-    await update.message.reply_text(
-        "👋 Welcome to Telegram Report Assistant\n\n"
-        "This bot helps you prepare a legitimate report "
-        "about a Telegram channel or message.\n\n"
-        "Choose an option below:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-
-# ============================================================
-# BUTTON HANDLER
-# ============================================================
-
-async def button_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    query = update.callback_query
-    await query.answer()
-
-    # --------------------------------------------------------
-    # SUBMIT REPORT
-    # --------------------------------------------------------
-
-    if query.data == "submit_report":
-
-        context.user_data.clear()
-
-        context.user_data["waiting_for_link"] = True
-
-        await query.edit_message_text(
-            "📝 Submit a Report\n\n"
-            "Send the Telegram channel or message link "
-            "you want to report.\n\n"
-            "Example:\n"
-            "https://t.me/example/123"
-        )
-
-    # --------------------------------------------------------
-    # ABOUT
-    # --------------------------------------------------------
-
-    elif query.data == "about":
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Back",
-                    callback_data="back_start",
-                )
-            ]
-        ]
-
-        await query.edit_message_text(
-            "ℹ️ About This Bot\n\n"
-            "This bot helps users organize legitimate "
-            "Telegram report requests.\n\n"
-            "You can provide a Telegram link, select the "
-            "appropriate reason, and describe the issue.\n\n"
-            "The bot does NOT send repeated or automated "
-            "mass reports."
-            ,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-
-    # --------------------------------------------------------
-    # HELP
-    # --------------------------------------------------------
-
-    elif query.data == "help":
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Back",
-                    callback_data="back_start",
-                )
-            ]
-        ]
-
-        await query.edit_message_text(
-            "❓ How To Use\n\n"
-            "1️⃣ Press Submit Report.\n\n"
-            "2️⃣ Send the Telegram channel or message link.\n\n"
-            "3️⃣ Select the reason.\n\n"
-            "4️⃣ Explain the problem.\n\n"
-            "5️⃣ Your report request will be recorded.\n\n"
-            "Use accurate information when making a report.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-
-    # --------------------------------------------------------
-    # BACK
-    # --------------------------------------------------------
-
-    elif query.data == "back_start":
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "📝 Submit Report",
-                    callback_data="submit_report",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "ℹ️ About",
-                    callback_data="about",
-                ),
-                InlineKeyboardButton(
-                    "❓ Help",
-                    callback_data="help",
-                ),
-            ],
-        ]
-
-        await query.edit_message_text(
-            "👋 Welcome to Telegram Report Assistant\n\n"
-            "Choose an option below:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-
-
-# ============================================================
-# RECEIVE TELEGRAM LINK
-# ============================================================
-
-async def receive_link(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    if not context.user_data.get("waiting_for_link"):
-        return
-
-    if not update.message or not update.message.text:
-        return
-
-    link = update.message.text.strip()
-
-    # Basic Telegram link validation
-    valid_link = (
-        link.startswith("https://t.me/")
-        or link.startswith("http://t.me/")
-        or link.startswith("t.me/")
-        or link.startswith("https://telegram.me/")
-        or link.startswith("http://telegram.me/")
-    )
-
-    if not valid_link:
-
-        await update.message.reply_text(
-            "❌ Invalid Telegram link.\n\n"
-            "Please send a Telegram channel or message link.\n\n"
-            "Example:\n"
-            "https://t.me/example/123"
-        )
-
-        return
-
-    context.user_data["report_link"] = link
-    context.user_data["waiting_for_link"] = False
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "🚫 Spam / Scam",
-                callback_data="reason_spam",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "⚠️ Illegal Content",
-                callback_data="reason_illegal",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "👤 Impersonation",
-                callback_data="reason_impersonation",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "📌 Other",
-                callback_data="reason_other",
-            )
-        ],
-    ]
-
-    await update.message.reply_text(
-        "✅ Telegram link received.\n\n"
-        "Now select the reason that best describes "
-        "the problem:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-
-# ============================================================
-# REASON HANDLER
-# ============================================================
-
-async def reason_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    query = update.callback_query
-    await query.answer()
-
-    reasons = {
-        "reason_spam": "Spam / Scam",
-        "reason_illegal": "Illegal Content",
-        "reason_impersonation": "Impersonation",
-        "reason_other": "Other",
-    }
-
-    reason = reasons.get(
-        query.data,
-        "Other",
-    )
-
-    context.user_data["reason"] = reason
-    context.user_data["waiting_for_description"] = True
-
-    await query.edit_message_text(
-        f"📌 Reason: {reason}\n\n"
-        "Now send a short explanation of the problem.\n\n"
-        "Please provide accurate information."
-    )
-
-
-# ============================================================
-# RECEIVE DESCRIPTION
-# ============================================================
-
-async def receive_description(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    if not context.user_data.get("waiting_for_description"):
-        return
-
-    if not update.message or not update.message.text:
-        return
-
-    description = update.message.text.strip()
-
-    if len(description) < 5:
-
-        await update.message.reply_text(
-            "❌ Please provide more information.\n\n"
-            "Your explanation should be at least a few words."
-        )
-
-        return
-
-    link = context.user_data.get(
-        "report_link",
-        "Unknown",
-    )
-
-    reason = context.user_data.get(
-        "reason",
-        "Other",
-    )
-
-    user = update.effective_user
-
-    # Create report record
-    report = {
-        "user_id": user.id,
-        "username": user.username,
-        "first_name": user.first_name,
-        "link": link,
-        "reason": reason,
-        "description": description,
-        "created_at": datetime.now(
-            timezone.utc
-        ).isoformat(),
-    }
-
-    reports.append(report)
-
-    # Clear temporary conversation data
-    context.user_data.clear()
-
-    await update.message.reply_text(
-        "✅ Report Request Recorded\n\n"
-        f"🔗 Link:\n{link}\n\n"
-        f"📌 Reason:\n{reason}\n\n"
-        f"📝 Description:\n{description}\n\n"
-        "The request has been recorded. "
-        "For an actual report, use Telegram's official "
-        "reporting functionality."
-    )
-
-
-# ============================================================
-# /STATS
-# ============================================================
-
-async def stats(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    await update.message.reply_text(
-        "📊 Bot Statistics\n\n"
-        f"Report requests recorded: {len(reports)}"
-    )
-
-
-# ============================================================
-# /CANCEL
-# ============================================================
-
-async def cancel(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    context.user_data.clear()
-
-    await update.message.reply_text(
-        "❌ Current report cancelled.\n\n"
-        "Use /start to begin again."
-    )
-
-
-# ============================================================
-# ERROR HANDLER
-# ============================================================
-
-async def error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    logger.error(
-        "Telegram bot error:",
-        exc_info=context.error,
-    )
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    logger.info("Starting Telegram Report Assistant...")
-
-    application = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .build()
-    )
-
-    # Commands
-    application.add_handler(
-        CommandHandler(
-            "start",
-            start,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "stats",
-            stats,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "cancel",
-            cancel,
-        )
-    )
-
-    # Main menu buttons
-    application.add_handler(
-        CallbackQueryHandler(
-            button_handler,
-            pattern="^(submit_report|about|help|back_start)$",
-        )
-    )
-
-    # Reason buttons
-    application.add_handler(
-        CallbackQueryHandler(
-            reason_handler,
-            pattern="^reason_",
-        )
-    )
-
-    # Text messages
-    #
-    # The link handler only acts when the user is waiting
-    # for a Telegram link.
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            receive_link,
-        ),
-        group=0,
-    )
-
-    # Description handler only acts after a reason is selected.
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            receive_description,
-        ),
-        group=1,
-    )
-
-    application.add_error_handler(
-        error_handler
-    )
-
-    logger.info("Bot is running.")
-
-    application.run_polling(
-        allowed_updates=Update.ALL_TYPES
-    )
-
-
-# ============================================================
-# START APPLICATION
-# ============================================================
+            logger.info(f"发送成功: {i+1}/{TOTAL_SENDS}")
+            
+            # 如果不是最后一次发送，则等待间隔时间
+            if i < TOTAL_SENDS - 1:
+                await asyncio.sleep(INTERVAL_SECONDS)
+                
+        except TelegramError as e:
+            logger.error(f"发送失败: {e}")
+            # 遇到错误时稍作延迟，避免死循环
+            await asyncio.sleep(5)
+
+    logger.info("本轮发送任务完成。")
+
+async def main():
+    """主循环"""
+    logger.info("机器人启动...")
+    
+    while True:
+        try:
+            await send_channel_report()
+            # 等待下一轮周期（2分钟周期已包含在发送逻辑中，这里只需等待剩余的极短时间或直接重置周期）
+            # 为了严格符合“每2分钟发送10次”，上一轮结束后稍微暂停一下再开始下一轮
+            logger.info("等待 2 分钟进入下一轮...")
+            await asyncio.sleep(120)
+        except Exception as e:
+            logger.error(f"主循环异常: {e}")
+            await asyncio.sleep(60)
 
 if __name__ == "__main__":
-    main()
+    if not TOKEN or not CHANNEL_ID:
+        logger.error("缺少环境变量 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHANNEL_ID")
+    else:
+        asyncio.run(main())
